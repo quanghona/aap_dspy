@@ -2,7 +2,7 @@ import json
 from typing import Any, Dict
 
 from aap_core.types import ContentType, MediaReference, TokenUsage
-from dspy import Image, Prediction
+from dspy import Audio, Image, Prediction
 from dspy.adapters.types.base_type import (
     CUSTOM_TYPE_END_IDENTIFIER,
     CUSTOM_TYPE_START_IDENTIFIER,
@@ -85,6 +85,35 @@ def media_ref_to_image(ref: MediaReference) -> Image:
     return Image(url=f"data:{ref['mime_type']};base64,{ref['value']}")
 
 
+def media_ref_to_audio(ref: MediaReference) -> Audio:
+    """Convert a resolved MediaReference to a dspy.Audio.
+
+    Unlike dspy.Image, dspy.Audio carries no URL: its wire shape is OpenAI
+    chat's ``input_audio`` part, which needs inline base64 data plus a short
+    format token. A URL ref is therefore downloaded here, via the explicit
+    ``Audio.from_url`` factory - dspy 3.3 removed the implicit fetch-on-string
+    construction, so relying on it would break on upgrade.
+
+    The format token follows dspy's own convention (MIME subtype with any
+    "x-" prefix stripped, as in Audio.from_file), so a ref maps to the same
+    token dspy would derive from the identical file. The token is not
+    rewritten beyond that: whether a provider accepts it (OpenAI chat takes
+    only wav/mp3) is provider knowledge below this layer, and
+    SUPPORTED_MIME_TYPES["audio"] in aap_core is the set refs arrive in.
+
+    Args:
+        ref (MediaReference): The resolved media reference from
+            BaseLLMChain._audio_parts.
+
+    Returns:
+        Audio: A dspy.Audio ready to be assigned to an InputField of a signature.
+    """
+    if ref["kind"] == "url":
+        return Audio.from_url(ref["value"])
+    subtype = ref["mime_type"].partition("/")[2]
+    return Audio(data=ref["value"], audio_format=subtype.removeprefix("x-"))
+
+
 def rehydrate_image_field(serialized: Any) -> Image:
     """Rebuild a dspy.Image from the marker string produced by model_dump.
 
@@ -123,3 +152,52 @@ def rehydrate_image_field(serialized: Any) -> Image:
                     return Image(url=url)
         raise ValueError("No image_url part found in dspy custom-type marker.")
     raise ValueError(f"Value is not a serialized dspy.Image: {type(serialized)}")
+
+
+def rehydrate_audio_field(serialized: Any) -> Audio:
+    """Rebuild a dspy.Audio from the marker string produced by model_dump.
+
+    An Audio input field survives Signature.model_dump() only as a
+    ``<<CUSTOM-TYPE-START-IDENTIFIER>>[{"type": "input_audio", "input_audio":
+    {"data": ..., "format": ...}}]<<CUSTOM-TYPE-END-IDENTIFIER>>`` string, and
+    feeding that string back into a signature raises (the before-validator
+    runs encode_audio on it and finds no usable source), so it must be
+    converted to a real Audio object before the predictor call.
+
+    Args:
+        serialized: The dumped value of an Audio-typed field.
+
+    Returns:
+        Audio: The rehydrated audio object.
+
+    Raises:
+        ValueError: If the value is not a parseable dspy custom-type marker
+            carrying an input_audio part.
+    """
+    if isinstance(serialized, Audio):
+        return serialized
+    if isinstance(serialized, str) and serialized.startswith(
+        CUSTOM_TYPE_START_IDENTIFIER
+    ):
+        body = serialized.removeprefix(CUSTOM_TYPE_START_IDENTIFIER).removesuffix(
+            CUSTOM_TYPE_END_IDENTIFIER
+        )
+        try:
+            parts = json.loads(body)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Unparseable dspy custom-type marker: {e}") from e
+        for part in parts if isinstance(parts, list) else [parts]:
+            if isinstance(part, dict) and part.get("type") == "input_audio":
+                payload = part.get("input_audio")
+                if isinstance(payload, dict):
+                    data = payload.get("data")
+                    audio_format = payload.get("format")
+                    if (
+                        isinstance(data, str)
+                        and data
+                        and isinstance(audio_format, str)
+                        and audio_format
+                    ):
+                        return Audio(data=data, audio_format=audio_format)
+        raise ValueError("No input_audio part found in dspy custom-type marker.")
+    raise ValueError(f"Value is not a serialized dspy.Audio: {type(serialized)}")

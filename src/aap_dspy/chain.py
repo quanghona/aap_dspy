@@ -11,6 +11,7 @@ from aap_core.types import (
 from aap_core.utils import extract_repo_id, huggingface_capabilities
 from .utils import (
     model_info_to_capabilities,
+    rehydrate_audio_field,
     rehydrate_image_field,
     token_from_response,
 )
@@ -79,11 +80,11 @@ class BaseSignatureAdapter(abc.ABC, Generic[Signature]):
         """
         raise NotImplementedError
 
-    # Media (image input) adapter pattern:
+    # Media (image/audio input) adapter pattern:
     # dspy delivers media through signature fields typed with the native
-    # dspy.Image type, not through message content parts. An adapter that
-    # supports image input declares the field on its signature and maps
-    # AgentMessage.query_media through the chain's gated funnel:
+    # dspy.Image / dspy.Audio types, not through message content parts. An
+    # adapter that supports media input declares the field on its signature
+    # and maps AgentMessage.query_media through the chain's gated funnel:
     #
     #     class VisionSig(dspy.Signature):
     #         image: Optional[dspy.Image] = dspy.InputField(default=None)
@@ -104,15 +105,22 @@ class BaseSignatureAdapter(abc.ABC, Generic[Signature]):
     #                 )
     #             ]
     #
+    # Audio is identical through chain._audio_parts and media_ref_to_audio,
+    # with one difference: dspy.Audio has no URL field (its wire part is
+    # inline base64 + a format token), so a URL ref is downloaded at mapping
+    # time by Audio.from_url. Prefer data-URI or local-path refs when the
+    # fetch latency matters.
+    #
     # Two dspy constraints shape this pattern:
     # - Signature instances validate every field, so output fields need
     #   placeholders (answer="") and the image field must be
     #   Optional[dspy.Image] with default=None to carry "no media" on text-only
     #   turns; model_dump(exclude_none=True) in _generate_response then drops
     #   the None image before the predictor call.
-    # - dspy emits native image parts only for dspy.Image *objects*; a plain
-    #   URL string would be interpolated as text. Hence the chain rehydrates
-    #   Image-typed fields around the model_dump round-trip.
+    # - dspy emits native media parts only for dspy.Image / dspy.Audio
+    #   *objects*; a plain string would be interpolated as text (or, for
+    #   Audio markers, fail validation outright). Hence the chain rehydrates
+    #   media-typed fields around the model_dump round-trip.
     #
     # Always obtain refs via chain._image_parts / chain._media_parts, never via
     # resolve_media directly: those are the only paths where the per-modality
@@ -314,20 +322,27 @@ class ChatCausalMultiTurnsChain(
         return conversation, data, has_tool, usage
 
     def _rehydrate_media(self, sig: Dict[str, Any]) -> None:
-        """Convert serialized dspy.Image input fields in a kwargs dict back to Image.
+        """Convert serialized dspy media input fields in a kwargs dict back to objects.
 
-        In-place. A field counts as image-typed when its annotation is
-        dspy.Image or Optional[dspy.Image] (the pattern adapters use to carry
-        None on text-only turns). Values that are already Image objects, or
-        absent from the dict, are left alone.
+        In-place. A field counts as media-typed when its annotation is
+        dspy.Image / dspy.Audio or Optional of either (the pattern adapters use
+        to carry None on text-only turns). Values that are already native
+        objects, or absent from the dict, are left alone.
         """
+        rehydrators = {
+            dspy.Image: rehydrate_image_field,
+            dspy.Audio: rehydrate_audio_field,
+        }
         for key, field in self._signature.input_fields.items():
             annotation = field.annotation
-            image_typed = annotation is dspy.Image or (
-                get_origin(annotation) is Union and dspy.Image in get_args(annotation)
-            )
-            if image_typed and isinstance(sig.get(key), str):
-                sig[key] = rehydrate_image_field(sig[key])
+            for media_type, rehydrate in rehydrators.items():
+                media_typed = annotation is media_type or (
+                    get_origin(annotation) is Union
+                    and media_type in get_args(annotation)
+                )
+                if media_typed and isinstance(sig.get(key), str):
+                    sig[key] = rehydrate(sig[key])
+                    break
 
     def _process_tools(
         self, conversation: List[dspy.Signature], response: dspy.Prediction
