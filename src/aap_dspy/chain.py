@@ -1,7 +1,13 @@
 import abc
 from typing import Any, Dict, Generic, List, Tuple, TypeVar, Union, get_args, get_origin
 from aap_core.chain import BaseCausalMultiTurnsChain
-from aap_core.types import AgentMessage, AgentResponse, ContentType, TokenUsage
+from aap_core.types import (
+    GATED_MODALITIES,
+    AgentMessage,
+    AgentResponse,
+    ContentType,
+    TokenUsage,
+)
 from aap_core.utils import extract_repo_id, huggingface_capabilities
 from .utils import (
     model_info_to_capabilities,
@@ -11,9 +17,6 @@ from .utils import (
 import dspy
 import litellm
 from pydantic import Field, PrivateAttr
-
-# Modalities the media gate can consult; detection reports on these.
-_GATED_MODALITIES: Tuple[ContentType, ...] = ("image", "audio", "video", "document")
 
 
 # litellm's provider names, used to tell "provider/repo-id" model strings from
@@ -229,7 +232,7 @@ class ChatCausalMultiTurnsChain(
     def _resolve_capabilities(self, lm: Any) -> Dict[ContentType, bool]:
         """Query the metadata sources once, filling gaps from the next source."""
         capabilities = self._litellm_capabilities(lm)
-        if set(capabilities) != set(_GATED_MODALITIES):
+        if set(capabilities) != set(GATED_MODALITIES):
             repo_id = extract_repo_id(self._identifier_candidates(lm))
             if repo_id is not None:
                 for modality, value in huggingface_capabilities(repo_id).items():
