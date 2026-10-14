@@ -1,4 +1,4 @@
-"""Offline structural tests for aap_dspy.chain image and audio input support.
+"""Offline structural tests for aap_dspy.chain image, audio and video input support.
 
 No network or real model calls: tests exercise the adapter funnel, the
 model_dump round-trip rehydration, capability detection and the media gate.
@@ -20,17 +20,23 @@ from aap_core.types import AgentMessage, ContentType
 import aap_dspy.chain as chain_module
 from aap_dspy.chain import BaseSignatureAdapter, ChatCausalMultiTurnsChain
 from aap_dspy.utils import (
+    Video,
     media_ref_to_audio,
     media_ref_to_image,
+    media_ref_to_video,
     model_info_to_capabilities,
     rehydrate_audio_field,
     rehydrate_image_field,
+    rehydrate_video_field,
 )
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 # RIFF container with the WAVE form at offset 8: what aap_core's sniffer
 # requires to identify a local file as audio/wav.
 WAV_MAGIC = b"RIFF\x00\x00\x00\x00WAVE"
+# ISO-BMFF file-size(4) + 'ftyp' + major_brand 'isom': what aap_core's sniffer
+# requires to identify a local file as video/mp4.
+MP4_MAGIC = b"\x00\x00\x00\x18ftyp" + b"isom" + b"\x00" * 8
 
 
 class VisionSig(dspy.Signature):
@@ -45,6 +51,14 @@ class AudioSig(dspy.Signature):
     """Answer the question about the audio."""
 
     audio: Optional[dspy.Audio] = dspy.InputField(default=None)
+    question: str = dspy.InputField()
+    answer: str = dspy.OutputField()
+
+
+class VideoSig(dspy.Signature):
+    """Answer the question about the video."""
+
+    video: Optional[Video] = dspy.InputField(default=None)
     question: str = dspy.InputField()
     answer: str = dspy.OutputField()
 
@@ -108,6 +122,26 @@ class AudioAdapter(BaseSignatureAdapter):
         return [(name, sig.answer) for sig in signatures]
 
 
+class VideoAdapter(BaseSignatureAdapter):
+    """Reference implementation of the media adapter pattern for video."""
+
+    def __init__(self):
+        self.chain = None
+
+    def msg2sig(self, message: AgentMessage) -> List[VideoSig]:
+        videos = self.chain._video_parts(message)
+        return [
+            VideoSig(
+                question=message.query,
+                video=(media_ref_to_video(videos[0]) if videos else None),
+                answer="",
+            )
+        ]
+
+    def sig2msg(self, signatures: List[VideoSig], name: str):
+        return [(name, sig.answer) for sig in signatures]
+
+
 class TextAdapter(BaseSignatureAdapter):
     """Adapter for a text-only signature; must be unaffected by media support."""
 
@@ -160,7 +194,12 @@ def stub_audio_fetch(monkeypatch):
 
 def make_chain(signature=VisionSig, adapter=None, lm_model=None, **kwargs):
     if adapter is None:
-        adapter = AudioAdapter() if signature is AudioSig else VisionAdapter()
+        if signature is AudioSig:
+            adapter = AudioAdapter()
+        elif signature is VideoSig:
+            adapter = VideoAdapter()
+        else:
+            adapter = VisionAdapter()
     chain = ChatCausalMultiTurnsChain(
         signature=signature,
         predictor=dspy.Predict(signature),
@@ -198,6 +237,11 @@ class TestPrepareConversationTextOnly:
         chain = make_chain(signature=AudioSig)
         conversation = chain._prepare_conversation(AgentMessage(query="hello"))
         assert conversation[0].audio is None
+
+    def test_no_video_field_populated_without_media(self):
+        chain = make_chain(signature=VideoSig)
+        conversation = chain._prepare_conversation(AgentMessage(query="hello"))
+        assert conversation[0].video is None
 
 
 class TestMediaRefToImage:
@@ -270,6 +314,48 @@ class TestMediaRefToAudio:
         assert audio.data == "AAAA"
 
 
+class TestMediaRefToVideo:
+    """Direct tests of the MediaRef -> Video mapping."""
+
+    def test_base64_ref_becomes_data_uri(self):
+        vid = media_ref_to_video(
+            {
+                "content_type": "video",
+                "kind": "base64",
+                "value": "AAAA",
+                "mime_type": "video/mp4",
+            }
+        )
+        assert isinstance(vid, Video)
+        assert vid.url == "data:video/mp4;base64,AAAA"
+
+    def test_url_ref_passes_url_through(self):
+        vid = media_ref_to_video(
+            {
+                "content_type": "video",
+                "kind": "url",
+                "value": "https://example.com/a.mp4",
+                "mime_type": "video/mp4",
+            }
+        )
+        # Unlike Audio, Video carries a URL field: no download at mapping time.
+        assert vid.url == "https://example.com/a.mp4"
+
+    def test_format_emits_file_content_part(self):
+        vid = media_ref_to_video(
+            {
+                "content_type": "video",
+                "kind": "base64",
+                "value": "AAAA",
+                "mime_type": "video/quicktime",
+            }
+        )
+        parts = vid.format()
+        assert parts == [
+            {"type": "file", "file": {"file_data": "data:video/quicktime;base64,AAAA"}}
+        ]
+
+
 class TestRehydrateImageField:
     """The model_dump round-trip fix."""
 
@@ -333,6 +419,43 @@ class TestRehydrateAudioField:
             rehydrate_audio_field(bad)
 
 
+class TestRehydrateVideoField:
+    """The model_dump round-trip fix for Video fields."""
+
+    def test_marker_string_rehydrates_to_video(self):
+        original = Video(url="data:video/mp4;base64,AAAA")
+        dumped = original.serialize_model()
+        assert isinstance(dumped, str) and dumped.startswith("<<CUSTOM-TYPE")
+        restored = rehydrate_video_field(dumped)
+        assert isinstance(restored, Video)
+        assert restored.url == "data:video/mp4;base64,AAAA"
+
+    def test_url_marker_rehydrates(self):
+        original = Video(url="https://example.com/a.mp4")
+        restored = rehydrate_video_field(original.serialize_model())
+        assert restored.url == "https://example.com/a.mp4"
+
+    def test_video_object_passes_through(self):
+        vid = Video(url="data:video/webm;base64,BBBB")
+        assert rehydrate_video_field(vid) is vid
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "plain text",
+            "<<CUSTOM-TYPE-START-IDENTIFIER>>not json<<CUSTOM-TYPE-END-IDENTIFIER>>",
+            # An image marker is not video: silently rebuilding it as Video
+            # would send image bytes on the file channel.
+            dspy.Image(url="https://example.com/a.png").serialize_model(),
+            # An audio marker is not video either.
+            dspy.Audio(data="AAAA", audio_format="wav").serialize_model(),
+        ],
+    )
+    def test_bad_input_raises_value_error(self, bad):
+        with pytest.raises(ValueError):
+            rehydrate_video_field(bad)
+
+
 class TestGenerateResponseRoundTrip:
     """_generate_response must not degrade Image fields to marker strings."""
 
@@ -374,6 +497,22 @@ class TestGenerateResponseRoundTrip:
         # the appended conversation entry keeps a real Audio, not a marker string
         assert isinstance(conversation[-1].audio, dspy.Audio)
         assert conversation[-1].audio.data == "AAAA"
+
+    def test_video_survives_dump_into_predictor(self):
+        chain = make_chain(signature=VideoSig)
+        msg = AgentMessage(
+            query="what?",
+            query_media=[("video", "data:video/mp4;base64,AAAA")],
+        )
+        conversation = chain._prepare_conversation(msg)
+        conversation, response, has_tool, usage = chain._generate_response(conversation)
+        assert response.answer == "It is a cat."
+        assert not has_tool
+        parts = user_content_parts(chain._lm)
+        assert any(p["type"] == "file" for p in parts)
+        # the appended conversation entry keeps a real Video, not a marker string
+        assert isinstance(conversation[-1].video, Video)
+        assert conversation[-1].video.url == "data:video/mp4;base64,AAAA"
 
 
 class TestInvokeEndToEnd:
@@ -449,6 +588,47 @@ class TestInvokeEndToEnd:
         chain(AgentMessage(query="hello"))
         parts = user_content_parts(chain._lm)
         assert not any(p["type"] == "input_audio" for p in parts)
+
+    def test_video_reaches_lm_as_file_part(self):
+        chain = make_chain(signature=VideoSig)
+        msg = AgentMessage(
+            query="describe", query_media=[("video", "data:video/mp4;base64,AAAA")]
+        )
+        out = chain(msg)
+        assert out.responses[-1][1] == "It is a cat."
+        parts = user_content_parts(chain._lm)
+        file_parts = [p for p in parts if p["type"] == "file"]
+        assert len(file_parts) == 1
+        assert file_parts[0]["file"]["file_data"] == "data:video/mp4;base64,AAAA"
+
+    def test_local_path_video_reaches_lm_as_data_uri(self, tmp_path):
+        f = tmp_path / "clip.mp4"
+        f.write_bytes(MP4_MAGIC + b"\x00" * 16)
+        chain = make_chain(signature=VideoSig)
+        msg = AgentMessage(query="describe", query_media=[("video", str(f))])
+        chain(msg)
+        parts = user_content_parts(chain._lm)
+        file_parts = [p for p in parts if p["type"] == "file"]
+        assert file_parts[0]["file"]["file_data"].startswith("data:video/mp4;base64,")
+        payload = file_parts[0]["file"]["file_data"].split("base64,", 1)[1]
+        assert base64.b64decode(payload) == f.read_bytes()
+
+    def test_url_video_passes_url_through(self):
+        """Unlike audio, video does not download at mapping time."""
+        chain = make_chain(signature=VideoSig)
+        msg = AgentMessage(
+            query="describe", query_media=[("video", "https://example.com/a.mp4")]
+        )
+        chain(msg)
+        parts = user_content_parts(chain._lm)
+        file_parts = [p for p in parts if p["type"] == "file"]
+        assert file_parts[0]["file"]["file_data"] == "https://example.com/a.mp4"
+
+    def test_text_only_message_sends_no_video_parts(self):
+        chain = make_chain(signature=VideoSig)
+        chain(AgentMessage(query="hello"))
+        parts = user_content_parts(chain._lm)
+        assert not any(p["type"] == "file" for p in parts)
 
 
 class TestCapabilityDetection:
@@ -534,6 +714,14 @@ class TestModelInfoToCapabilities:
 
     def test_non_dict_info_is_undecidable(self):
         assert model_info_to_capabilities(None) == {}
+
+    def test_video_is_never_reported_from_litellm(self):
+        """litellm has no supports_video_input flag; video must stay absent
+        from the capabilities dict so auto mode fails loud rather than
+        silently denying."""
+        info = {"supports_vision": True, "supports_audio_input": True}
+        caps = model_info_to_capabilities(info)
+        assert "video" not in caps
 
 
 class TestGateIntegration:
@@ -634,3 +822,52 @@ class TestGateIntegration:
         audio = chain._prepare_conversation(msg)[0].audio
         assert isinstance(audio, dspy.Audio)
         assert audio.audio_format == "wav"
+
+    def test_non_video_model_drops_video_with_warning(self, caplog, hf):
+        hf.results["meta-llama/Llama-3.2-3B-Instruct"] = {"video": False}
+        chain = make_chain(
+            signature=VideoSig,
+            lm_model="hosted_vllm/meta-llama/Llama-3.2-3B-Instruct",
+        )
+        msg = AgentMessage(
+            query="watch", query_media=[("video", "data:video/mp4;base64,AAAA")]
+        )
+        with caplog.at_level(logging.WARNING, logger="aap_core.types"):
+            conversation = chain._prepare_conversation(msg)
+        assert conversation[0].video is None
+        assert "does not support video input" in caplog.text
+
+    def test_disabled_policy_overrides_video_detection(self):
+        chain = make_chain(
+            signature=VideoSig,
+            lm_model="openai/gpt-4o-mini",
+            media_support={"video": "disabled"},
+        )
+        msg = AgentMessage(
+            query="watch", query_media=[("video", "data:video/mp4;base64,AAAA")]
+        )
+        assert chain._prepare_conversation(msg)[0].video is None
+
+    def test_enabled_policy_forces_video_on_unknown_model(self):
+        chain = make_chain(
+            signature=VideoSig,
+            lm_model="provider/some-brand-new-model",
+            media_support={"video": "enabled"},
+        )
+        msg = AgentMessage(
+            query="watch", query_media=[("video", "data:video/mp4;base64,AAAA")]
+        )
+        vid = chain._prepare_conversation(msg)[0].video
+        assert isinstance(vid, Video)
+        assert vid.url == "data:video/mp4;base64,AAAA"
+
+    def test_undecidable_model_attaches_video_fail_loud(self):
+        chain = make_chain(
+            signature=VideoSig,
+            lm_model="provider/some-brand-new-model",
+        )
+        msg = AgentMessage(
+            query="watch", query_media=[("video", "data:video/mp4;base64,AAAA")]
+        )
+        vid = chain._prepare_conversation(msg)[0].video
+        assert isinstance(vid, Video)

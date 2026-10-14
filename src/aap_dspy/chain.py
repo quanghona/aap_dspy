@@ -1,5 +1,8 @@
 import abc
 from typing import Any, Dict, Generic, List, Tuple, TypeVar, Union, get_args, get_origin
+
+import dspy
+import litellm
 from aap_core.chain import BaseCausalMultiTurnsChain
 from aap_core.types import (
     GATED_MODALITIES,
@@ -9,15 +12,16 @@ from aap_core.types import (
     TokenUsage,
 )
 from aap_core.utils import extract_repo_id, huggingface_capabilities
+from pydantic import Field, PrivateAttr
+
 from .utils import (
+    Video,
     model_info_to_capabilities,
     rehydrate_audio_field,
     rehydrate_image_field,
+    rehydrate_video_field,
     token_from_response,
 )
-import dspy
-import litellm
-from pydantic import Field, PrivateAttr
 
 
 # litellm's provider names, used to tell "provider/repo-id" model strings from
@@ -80,11 +84,12 @@ class BaseSignatureAdapter(abc.ABC, Generic[Signature]):
         """
         raise NotImplementedError
 
-    # Media (image/audio input) adapter pattern:
+    # Media (image/audio/video input) adapter pattern:
     # dspy delivers media through signature fields typed with the native
-    # dspy.Image / dspy.Audio types, not through message content parts. An
-    # adapter that supports media input declares the field on its signature
-    # and maps AgentMessage.query_media through the chain's gated funnel:
+    # dspy.Image / dspy.Audio types (or the custom Video type for video),
+    # not through message content parts. An adapter that supports media
+    # input declares the field on its signature and maps
+    # AgentMessage.query_media through the chain's gated funnel:
     #
     #     class VisionSig(dspy.Signature):
     #         image: Optional[dspy.Image] = dspy.InputField(default=None)
@@ -111,23 +116,31 @@ class BaseSignatureAdapter(abc.ABC, Generic[Signature]):
     # time by Audio.from_url. Prefer data-URI or local-path refs when the
     # fetch latency matters.
     #
+    # Video uses chain._video_parts and media_ref_to_video. dspy has no
+    # native Video type through 3.4.1 (upstream Video PRs closed unmerged);
+    # the custom Video type defined in aap_dspy.utils emits a file content
+    # part, which litellm's provider handlers already dispatch for non-image
+    # binary media. Like Image, Video carries a URL or data URI without
+    # downloading at mapping time.
+    #
     # Two dspy constraints shape this pattern:
     # - Signature instances validate every field, so output fields need
-    #   placeholders (answer="") and the image field must be
-    #   Optional[dspy.Image] with default=None to carry "no media" on text-only
-    #   turns; model_dump(exclude_none=True) in _generate_response then drops
-    #   the None image before the predictor call.
-    # - dspy emits native media parts only for dspy.Image / dspy.Audio
+    #   placeholders (answer="") and the media field must be
+    #   Optional[dspy.Image] (or Optional[Video], etc.) with default=None to
+    #   carry "no media" on text-only turns; model_dump(exclude_none=True) in
+    #   _generate_response then drops the None field before the predictor call.
+    # - dspy emits native media parts only for dspy.Image / dspy.Audio / Video
     #   *objects*; a plain string would be interpolated as text (or, for
     #   Audio markers, fail validation outright). Hence the chain rehydrates
     #   media-typed fields around the model_dump round-trip.
     #
-    # Always obtain refs via chain._image_parts / chain._media_parts, never via
-    # resolve_media directly: those are the only paths where the per-modality
-    # capability gate (media_support / detect_capabilities) is applied, so a
-    # non-vision model drops media instead of failing at the API. The chain
-    # also rehydrates Image fields around the model_dump round-trip in
-    # _generate_response, so dumped conversations keep working.
+    # Always obtain refs via chain._image_parts / chain._audio_parts /
+    # chain._video_parts, never via resolve_media directly: those are the only
+    # paths where the per-modality capability gate (media_support /
+    # detect_capabilities) is applied, so a non-vision model drops media
+    # instead of failing at the API. The chain also rehydrates media fields
+    # around the model_dump round-trip in _generate_response, so dumped
+    # conversations keep working.
 
     @classmethod
     def with_prefill(cls, prefill_dict: Dict[str, str]) -> "BaseSignatureAdapter":
@@ -291,9 +304,9 @@ class ChatCausalMultiTurnsChain(
         self, conversation: List[dspy.Signature], **kwargs
     ) -> Tuple[List[dspy.Signature], dspy.Prediction, bool, TokenUsage]:
         sig = conversation[-1].model_dump(exclude_none=True)
-        # model_dump serializes dspy.Image fields to custom-type marker strings,
-        # which the predictor would treat as plain text. Rehydrate them so the
-        # adapter can emit native image content parts.
+        # model_dump serializes dspy media fields (Image, Audio, Video) to
+        # custom-type marker strings, which the predictor would treat as plain
+        # text. Rehydrate them so the adapter can emit native content parts.
         self._rehydrate_media(sig)
         if self._history_field_name is not None:
             # Convert dict to object as the library use object to access the history
@@ -314,7 +327,7 @@ class ChatCausalMultiTurnsChain(
             else bool(data[self._tool_calls_field])
         )
         sig.update(data.items())
-        # The prediction echoes input fields, Image fields included, as marker
+        # The prediction echoes input fields, media fields included, as marker
         # strings again; rehydrate so the appended conversation entry stays
         # valid for the next round-trip.
         self._rehydrate_media(sig)
@@ -325,13 +338,14 @@ class ChatCausalMultiTurnsChain(
         """Convert serialized dspy media input fields in a kwargs dict back to objects.
 
         In-place. A field counts as media-typed when its annotation is
-        dspy.Image / dspy.Audio or Optional of either (the pattern adapters use
-        to carry None on text-only turns). Values that are already native
-        objects, or absent from the dict, are left alone.
+        dspy.Image / dspy.Audio / Video or Optional of any of them (the pattern
+        adapters use to carry None on text-only turns). Values that are already
+        native objects, or absent from the dict, are left alone.
         """
         rehydrators = {
             dspy.Image: rehydrate_image_field,
             dspy.Audio: rehydrate_audio_field,
+            Video: rehydrate_video_field,
         }
         for key, field in self._signature.input_fields.items():
             annotation = field.annotation
