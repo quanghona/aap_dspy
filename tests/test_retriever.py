@@ -23,7 +23,9 @@ class _MockEmbeddings(dspy.Embeddings):
 
     def __init__(self, passages: list[str], **kwargs):
         # Provide a minimal mock embedder function
-        mock_embedder = lambda x: [[0.0] * 10 for _ in x]
+        def mock_embedder(texts):
+            return [[0.0] * 10 for _ in texts]
+
         super().__init__(corpus=passages, embedder=mock_embedder, **kwargs)
         self._passages = passages
 
@@ -246,7 +248,6 @@ class TestRetrieverAdapterRetrieveWithEmbeddings:
         passages = ["placeholder"]
         embeddings = _MockEmbeddings(passages=passages)
         # Override forward to return empty passages
-        original_forward = embeddings.forward
         embeddings.forward = lambda query, **kwargs: type(
             "MockResult", (), {"passages": []}
         )()
