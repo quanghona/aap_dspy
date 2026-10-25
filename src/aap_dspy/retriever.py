@@ -32,7 +32,11 @@ class RetrieverAdapter(BaseRetriever):
             data.append(result)
 
         data_key = self.data_key.replace("context.", "")
-        content = " ".join(data) if len(data) > 1 else data
+        # Always store a str. Returning the raw list for 0 or 1 hits made the
+        # prompt see a different type per hit count, which a str-annotated
+        # dspy.InputField rejects. Newline keeps each passage on its own row so a
+        # TOON table is not glued to the following passage.
+        content = "\n".join(str(item) for item in data)
         if message.context is None:
             message.context = {data_key: content}
         else:

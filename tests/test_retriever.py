@@ -90,7 +90,7 @@ class TestRetrieverAdapterRetrieveWithRetrieve:
 
         assert result.context is not None
         assert result.context["data"] == (
-            "Bird species A is endangered. Bird species B is vulnerable."
+            "Bird species A is endangered.\nBird species B is vulnerable."
         )
 
     def test_retrieve_with_existing_context(self):
@@ -107,7 +107,7 @@ class TestRetrieverAdapterRetrieveWithRetrieve:
 
         assert result.context is not None
         assert result.context["other_key"] == "existing_value"
-        assert result.context["data"] == ["New bird info"]
+        assert result.context["data"] == "New bird info"
 
     def test_retrieve_with_custom_data_key(self):
         """Test retrieve with a custom data_key."""
@@ -119,7 +119,7 @@ class TestRetrieverAdapterRetrieveWithRetrieve:
         result = adapter.retrieve(message)
 
         assert result.context is not None
-        assert result.context["bird_info"] == ["Custom bird data"]
+        assert result.context["bird_info"] == "Custom bird data"
 
     def test_retrieve_with_existing_context_same_key(self):
         """Test retrieve overwrites existing data at the same data_key."""
@@ -130,7 +130,8 @@ class TestRetrieverAdapterRetrieveWithRetrieve:
 
         result = adapter.retrieve(message)
 
-        assert result.context["data"] == ["Updated bird data"]
+        assert isinstance(result.context["data"], str)
+        assert result.context["data"] == "Updated bird data"
 
     def test_retrieve_single_passage(self):
         """Test retrieve with a single passage."""
@@ -141,7 +142,8 @@ class TestRetrieverAdapterRetrieveWithRetrieve:
 
         result = adapter.retrieve(message)
 
-        assert result.context["data"] == ["Single bird fact"]
+        assert isinstance(result.context["data"], str)
+        assert result.context["data"] == "Single bird fact"
 
     def test_retrieve_empty_results(self):
         """Test retrieve when retriever returns no passages."""
@@ -153,7 +155,7 @@ class TestRetrieverAdapterRetrieveWithRetrieve:
         result = adapter.retrieve(message)
 
         assert result.context is not None
-        assert result.context["data"] == []
+        assert result.context["data"] == ""
 
     def test_retrieve_multiple_passages(self):
         """Test retrieve with multiple passages."""
@@ -170,8 +172,8 @@ class TestRetrieverAdapterRetrieveWithRetrieve:
         result = adapter.retrieve(message)
 
         assert result.context["data"] == (
-            "Eagle - apex predator Penguin - flightless bird "
-            "Ostrich - largest bird Hummingbird - smallest bird"
+            "Eagle - apex predator\nPenguin - flightless bird\n"
+            "Ostrich - largest bird\nHummingbird - smallest bird"
         )
 
     def test_retrieve_preserves_message_query(self):
@@ -228,7 +230,7 @@ class TestRetrieverAdapterRetrieveWithEmbeddings:
 
         assert result.context is not None
         assert result.context["data"] == (
-            "Mammal A is endangered. Mammal B is vulnerable."
+            "Mammal A is endangered.\nMammal B is vulnerable."
         )
 
     def test_retrieve_with_embeddings_single_passage(self):
@@ -240,7 +242,8 @@ class TestRetrieverAdapterRetrieveWithEmbeddings:
 
         result = adapter.retrieve(message)
 
-        assert result.context["data"] == ["Mammal fact"]
+        assert isinstance(result.context["data"], str)
+        assert result.context["data"] == "Mammal fact"
 
     def test_retrieve_with_embeddings_empty_results(self):
         """Test retrieve using Embeddings when no passages are returned."""
@@ -257,7 +260,7 @@ class TestRetrieverAdapterRetrieveWithEmbeddings:
         result = adapter.retrieve(message)
 
         assert result.context is not None
-        assert result.context["data"] == []
+        assert result.context["data"] == ""
 
     def test_retrieve_with_embeddings_custom_data_key(self):
         """Test retrieve using Embeddings with a custom data_key."""
@@ -269,7 +272,7 @@ class TestRetrieverAdapterRetrieveWithEmbeddings:
         result = adapter.retrieve(message)
 
         assert result.context is not None
-        assert result.context["mammal_info"] == ["Custom mammal data"]
+        assert result.context["mammal_info"] == "Custom mammal data"
 
     def test_retrieve_with_embeddings_preserves_query(self):
         """Test that retrieve using Embeddings preserves the original query."""
@@ -296,7 +299,7 @@ class TestRetrieverAdapterEdgeCases:
         result = adapter.retrieve(message)
 
         assert result.context is not None
-        expected = " ".join(passages)
+        expected = "\n".join(passages)
         assert result.context["data"] == expected
 
     def test_retrieve_with_empty_string_passage(self):
@@ -308,7 +311,7 @@ class TestRetrieverAdapterEdgeCases:
 
         result = adapter.retrieve(message)
 
-        assert result.context["data"] == " non-empty passage"
+        assert result.context["data"] == "\nnon-empty passage"
 
     def test_retrieve_with_whitespace_only_passage(self):
         """Test retrieve when a passage is whitespace only."""
@@ -319,7 +322,7 @@ class TestRetrieverAdapterEdgeCases:
 
         result = adapter.retrieve(message)
 
-        assert result.context["data"] == "    valid passage"
+        assert result.context["data"] == "   \nvalid passage"
 
     def test_retrieve_with_special_characters(self):
         """Test retrieve with passages containing special characters."""
@@ -334,7 +337,7 @@ class TestRetrieverAdapterEdgeCases:
         result = adapter.retrieve(message)
 
         assert result.context["data"] == (
-            "Passage with <html> tags Passage with 'quotes' and \"double quotes\""
+            "Passage with <html> tags\nPassage with 'quotes' and \"double quotes\""
         )
 
     def test_retrieve_with_unicode_characters(self):
@@ -346,7 +349,7 @@ class TestRetrieverAdapterEdgeCases:
 
         result = adapter.retrieve(message)
 
-        assert result.context["data"] == "Bird: 鳥 Oiseau: 🐦 Ave: 🦅"
+        assert result.context["data"] == "Bird: 鳥\nOiseau: 🐦\nAve: 🦅"
 
     def test_retrieve_overwrites_existing_context_value(self):
         """Test that retrieve overwrites existing context value at the same key."""
@@ -360,7 +363,7 @@ class TestRetrieverAdapterEdgeCases:
 
         result = adapter.retrieve(message)
 
-        assert result.context["data"] == ["New data"]
+        assert result.context["data"] == "New data"
 
     def test_retrieve_with_newline_in_passage(self):
         """Test retrieve with passages containing newline characters."""
@@ -371,4 +374,30 @@ class TestRetrieverAdapterEdgeCases:
 
         result = adapter.retrieve(message)
 
-        assert result.context["data"] == "Line 1\nLine 2 Line 3\nLine 4"
+        assert result.context["data"] == "Line 1\nLine 2\nLine 3\nLine 4"
+
+    @pytest.mark.parametrize(
+        "passages",
+        [
+            [],
+            ["only one"],
+            ["first", "second"],
+            ["first", "second", "third"],
+        ],
+        ids=["zero", "single", "two", "three"],
+    )
+    def test_context_value_is_always_a_string(self, passages):
+        """The stored type must not depend on hit count.
+
+        RetrieverAdapter used to store a bare list for 0 or 1 hits and a joined
+        str for >=2, which made the prompt see a different type per query and
+        broke any str-annotated dspy.InputField on a single hit. Pinning the
+        invariant here so the asymmetry cannot come back.
+        """
+        retriever = _MockRetrieve(passages=passages)
+        adapter = RetrieverAdapter(retriever=retriever)
+
+        result = adapter.retrieve(AgentMessage(query="q"))
+
+        assert isinstance(result.context["data"], str)
+        assert result.context["data"] == "\n".join(passages)
