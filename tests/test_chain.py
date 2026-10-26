@@ -642,8 +642,12 @@ class TestCapabilityDetection:
             ("azure/gpt-4o", {"image": True}),
             # Mapped but with no input-modality flags: undecidable, not denial.
             ("openai/gpt-3.5-turbo", {}),
-            # Unmapped revisions stay undecidable.
-            ("anthropic/claude-sonnet-4-20250514", {}),
+            # Unmapped revisions stay undecidable. The name must match no
+            # litellm pattern, present or future: real dated revisions rot
+            # (litellm added claude-sonnet-4-20250514, then a claude-sonnet-4-*
+            # wildcard, to its table), so the token is deliberately fake while
+            # keeping the provider/model shape the code parses.
+            ("anthropic/this-model-will-never-exist", {}),
             ("provider/some-brand-new-model-v9", {}),
         ],
     )
